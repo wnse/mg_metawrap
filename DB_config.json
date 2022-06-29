@@ -1,0 +1,6 @@
+{
+  "BMTAGGER_DB": "/mnt/data/metawrap_db/BMTAGGER_INDEX/",
+  "KRAKEN2_DB": "/mnt/data/metawrap_db/KRAKEN2_DB/KRAKEN2_DB/",
+  "BLASTDB": "/mnt/data/metawrap_db/NCBI_nt",
+  "TAXDUMP": "/mnt/data/metawrap_db/NCBI_tax"
+}
