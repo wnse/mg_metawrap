@@ -1,4 +1,6 @@
 import os
+import docker
+import sys
 import json
 import logging
 import argparse
@@ -7,6 +9,7 @@ import shutil
 
 from post_status import copy_file
 from mkdir import mkdir
+from parse_fastqc_html import get_fqc
 
 def shell_db_path(db_path_file):
 	with open(db_path_file) as h:
@@ -20,14 +23,17 @@ def shell_db_path(db_path_file):
 
 def shell_readqc(data1, data2, name, out, threads):
 	outdir = os.path.join(out,'READ_QC', name)
-	shell_str = f'metawrap read_qc -t {threads} -1 {data1} -2 {data2} -o {out}'
+	mkdir(outdir)
+	shell_str = f'metawrap read_qc -t {threads} -1 {data1} -2 {data2} -o {outdir}'
 	tmp1 = os.path.join(outdir, 'final_pure_reads_1.fastq')
 	tmp2 = os.path.join(outdir, 'final_pure_reads_2.fastq')
 	return shell_str, [tmp1, tmp2]
 
 def shell_clean(data_list, name_list, out):
 	outdir = os.path.join(out, 'CLEAN_READS')
+	mkdir(outdir)
 	totaldir = os.path.join(out, 'CLEAN_READS_T')
+	mkdir(totaldir)
 	shell_str = ''
 	clean_data_list = []
 	for d, n in zip(data_list, name_list):
@@ -82,7 +88,7 @@ def shell_quant(data_list, data_contig, binRedir, out):
 def shell_reassemble(data1, data2, binRedir, out, threads, memory_G):
 	outdir = os.path.join(out, 'BIN_REASSEMBLY')
 	meta_bin = os.path.join(binRedir, 'metawrap_50_10_bins')
-	shell_str = f'metawrap reassemble_bins -t {threads} -m {memory_G} -c 50 -x 10 -o {outdir} -1 {data1} -2 {data2} -b meta_bin'
+	shell_str = f'metawrap reassemble_bins -t {threads} -m {memory_G} -c 50 -x 10 -o {outdir} -1 {data1} -2 {data2} -b {meta_bin}'
 	return shell_str, outdir
 
 def shell_annotate(binRadir, out, threads):
@@ -109,7 +115,20 @@ def get_kraken_shell(db_config, data_list, name_list, outdir, threads, kraken=Fa
 		if len(fqs)<2:
 			logging.error(f'data should be paired fastq: {fqs}')
 		else:
-			tmp_shell, clean_data_list = shell_readqc(fqs[0], fqs[1], name, outdir, threads)
+			tmp_fq = []
+			tmp_shell = []
+			if os.path.splitext(fqs[0])[1]=='.gz':
+				tmp_fq.append(os.path.join(outdir, f'{name}_1.fastq'))
+				tmp_shell = f'gunzip -c {fqs[0]} >{tmp_fq[0]}'
+				lst_readqc_shell.append(tmp_shell)
+			# if os.path.splitext(fqs[1])[1]=='.gz':
+				tmp_fq.append(os.path.join(outdir, f'{name}_2.fastq'))
+				tmp_shell = f'gunzip -c {fqs[1]} >{tmp_fq[1]}'
+				lst_readqc_shell.append(tmp_shell)
+			if not tmp_fq:
+				tmp_fq = fqs
+
+			tmp_shell, clean_data_list = shell_readqc(tmp_fq[0], tmp_fq[1], name, outdir, threads)
 			lst_readqc_shell.append(tmp_shell)
 			lst_readqc_file.append(clean_data_list)
 			lst_readqc_name.append(name)
@@ -159,6 +178,109 @@ def get_binning_shell(db_config, data_list, name_list, outdir, threads, memory_G
 	shell_str = '\n'.join(lst_total_shell)
 	return shell_str
 
+def run_docker(image, volumes, cmd):
+    client = docker.from_env()
+    logging.info(cmd)
+    path = ("/root/metaWRAP/bin:/root/miniconda3/envs/metawrap-env/bin:"
+    	"/root/miniconda3/condabin:/root/anaconda3/bin:/root/anaconda3/condabin:"
+    	"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/root/bin:/root/metaWRAP/bin:/root/miniconda3/envs/metawrap-env/bin")
+    return client.containers.run(image, cmd, volumes=volumes, environment=[f"PATH=PATH:{path}"],
+    	remove=True, stdout=True, stderr=True)
+
+
+def run_sh(sh_file, path_list):
+    # image_name='mg_metawrap:220507'
+    image_name='wnse/metawrap'
+    cmd = f'sh -c "/usr/bin/sh {sh_file} >{sh_file}.log"'
+    vols = set(path_list)
+    vols = [f'{p}:{p}' for p in vols]    
+    try:
+        docker_out = run_docker(image_name, vols, cmd)
+        logging.info(f'docker out: {docker_out}')
+    except Exception as e:
+        logging.error(e)
+
+
+def get_file_path(file):
+    outdict = {}
+    if os.path.isfile(file):
+    	logging.info(f'get_file_path:{file}')
+    	return {os.path.split(file)[1]:file}
+    elif os.path.isdir(i):
+        try:
+        	for f in os.listdir(file):
+        		tmp_f = os.path.join(file, f)
+        		outdict.update(get_file_path(tmp_f))
+        except Exception as e:
+            logging.error(e)
+    else:
+    	logging.info(f'get_file_path error')
+
+    return outdict
+
+def copy_file_batch(name_list, tmp_dir, outdir, step=2):
+	outdict = {}
+	res_file0 = {'READ_QC':[],'KRAKEN':['kronagram.html']}
+	res_file1 = {'READ_QC':[],
+		'KRAKEN':['kronagram.html'],
+		'ASSEMBLY':['final_assembly.fasta','QUAST_out'],}
+	res_file2 = {
+		'READ_QC':[],
+		'KRAKEN':['kronagram.html'],
+		'ASSEMBLY':['final_assembly.fasta','QUAST_out'],
+		'BLOBOLOGY':['blobplot_figures','blobplot_figures_only_binned_contigs','final_assembly.binned.blobplot','final_assembly.blobplot'],
+		'QUANT_BINS':['bin_abundance_table.tab','quant_files'],
+		'BIN_REASSEMBLY':['original_bins.stats','reassembled_bins','reassembled_bins.png','reassembled_bins.stats','reassembly_results.eps','reassembly_results.png'],
+		'FUNCT_ANNOT':['bin_funct_annotations', 'bin_translated_genes', 'bin_untranslated_genes', 'prokka_out'],
+		'BIN_CLASSIFICATION':['bin_taxonomy.tab','contig_taxonomy.tab']
+		}
+
+	if step == 0:
+		res_file = res_file0
+	elif step == 1:
+		res_file = res_file1
+	else:
+		res_file = res_file2
+
+	for sample in name_list:
+		res_file['READ_QC'].append(os.path.join(tmp_dir, 'READ_QC', sample))
+
+		html_list = [os.path.join(tmp_dir, 'READ_QC', sample, 'pre-QC_report', i) for i in [f'{sample}_1_fastqc.html', f'{sample}_2_fastqc.html'] ]
+		outdict['preQc'] = {}
+		for html in html_list:
+			sample_name = os.path.splitext(os.path.split(html)[1])[0]
+			outdict['preQc'][sample_name] = get_fqc(html)
+
+		html_list = [os.path.join(tmp_dir, 'READ_QC', sample, 'post-QC_report', i) for i in [f'{sample}_1_fastqc.html', f'{sample}_2_fastqc.html'] ]
+		outdict['postQc'] = {}
+		for html in html_list:
+			sample_name = os.path.splitext(os.path.split(html)[1])[0]
+			outdict['postQc'][sample_name] = get_fqc(html)
+	for sample in name_list:
+		try:
+			os.remove(os.path.join(outdir, 'READ_QC', sample, "host_reads_1.fastq"))
+			os.remove(os.path.join(outdir, 'READ_QC', sample, "host_reads_2.fastq"))
+		except Exception as e:
+			logging.error(f'rm_file {e}')
+
+	for d, fs in res_file.items():
+		target_dir = os.path.join(outdir, d)
+		mkdir(target_dir)
+		tmp_list = [os.path.join(tmp_dir, d, i) for i in fs]
+		try:
+			copy_file(tmp_list, target_dir)
+		except Exception as e:
+			logging.error(f'copy_file {e}')
+
+		for i in fs:
+			get_file_path_names = ['kronagram.html','blobplot_figures',
+			'blobplot_figures_only_binned_contigs','reassembled_bins.png','reassembly_results.png']
+			if i in get_file_path_names:
+				outdict.update(get_file_path(i))
+
+	return outdict
+
+
 if __name__ == '__main__':
 	bin_dir = os.path.split(os.path.realpath(__file__))[0]
 	memory_total = str(int(psutil.virtual_memory().total/1024/1024/1024))
@@ -178,8 +300,8 @@ if __name__ == '__main__':
 	outdir = args.outdir
 	mkdir(outdir)
 	logfile = os.path.join(outdir, 'log')
-	# logging.basicConfig(level=logging.INFO, filename=logfile, format='%(asctime)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S')
-	logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S')
+	logging.basicConfig(level=logging.INFO, filename=logfile, format='%(asctime)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S')
+	# logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S')
 
 	db_config = args.config
 	data_list = args.input
@@ -191,30 +313,33 @@ if __name__ == '__main__':
 	mkdir(tmp_dir)
 
 	outdict = get_binning_shell(db_config, data_list, name_list, tmp_dir, threads, memory)
-	with open(os.path.join(outdir, 'metawrap.sh'), 'w') as h:
+	sh_file = os.path.join(outdir, 'metawrap.sh')
+	with open(sh_file, 'w') as h:
 		print(outdict, file=h)
-	# get_data_path()
-# docker run --rm -v /mnt/data/:/mnt/data --env PATH=$PATH:/root/metaWRAP/bin:/root/miniconda3/envs/metawrap-env/bin/ mg_metawrap:220507 sh /mnt/data/mg_metawrap/test_out/ERR1449725/run.sh
+
+	with open(db_config) as h:
+		db_path = json.load(h)
+	# db_path = '/mnt/data/metawrap_db/'
+	data_list_tmp = [i for data in data_list for i in data]
+	path_list = list(db_path.values()) + [outdir] + data_list_tmp
+	logging.info(path_list)
+	# sys.exit()
+	run_sh(sh_file, path_list)
 
 	res_file = {
+		'READ_QC':[],
 		'KRAKEN':['kronagram.html'],
 		'ASSEMBLY':['final_assembly.fasta','QUAST_out'],
 		'BLOBOLOGY':['blobplot_figures','blobplot_figures_only_binned_contigs','final_assembly.binned.blobplot','final_assembly.blobplot'],
 		'QUANT_BINS':['bin_abundance_table.tab','quant_files'],
 		'BIN_REASSEMBLY':['original_bins.stats','reassembled_bins','reassembled_bins.png','reassembled_bins.stats','reassembly_results.eps','reassembly_results.png'],
-		'FUNCT_ANNOT':['bin_funct_annotations'],
+		'FUNCT_ANNOT':['bin_funct_annotations', 'bin_translated_genes', 'bin_untranslated_genes', 'prokka_out'],
 		'BIN_CLASSIFICATION':['bin_taxonomy.tab','contig_taxonomy.tab']
 		}
 
-	res_file_lst = []
 	for sample in name_list:
-		try:
-			shutil.rmtree(os.path.join(tmp_dir, 'READ_QC', sample, "host_reads_1.fastq"))
-			shutil.rmtree(os.path.join(tmp_dir, 'READ_QC', sample, "host_reads_2.fastq"))
-		except Exception as e:
-			logging.error(f'rm_file {e}')
-		res_file_lst.append(os.path.join(tmp_dir, 'READ_QC', sample))
-		res_file_lst.append(os.path.join(tmp_dir, 'READ_QC', sample))
+		res_file['READ_QC'].append(os.path.join(tmp_dir, 'READ_QC', sample))
+
 	for d, fs in res_file.items():
 		target_dir = os.path.join(outdir, d)
 		mkdir(target_dir)
@@ -224,10 +349,17 @@ if __name__ == '__main__':
 		except Exception as e:
 			logging.error(f'copy_file {e}')
 
-	# try:
-	# 	shutil.rmtree(tmp_dir)
-	# except Exception as e:
-	# 	logging.error(f'rm_file {e}')
+	for sample in name_list:
+		try:
+			os.remove(os.path.join(outdir, 'READ_QC', sample, "host_reads_1.fastq"))
+			os.remove(os.path.join(outdir, 'READ_QC', sample, "host_reads_2.fastq"))
+		except Exception as e:
+			logging.error(f'rm_file {e}')
+
+	try:
+		shutil.rmtree(tmp_dir)
+	except Exception as e:
+		logging.error(f'rm_file {e}')
 
 
 
