@@ -62,7 +62,7 @@ def get_contigs_lengths(html_file):
     tmpout = json.loads(tmpout.strip())
 #     print(tmpout.keys())
 #     outdict['lists_of_lengths'] = tmpout['lists_of_lengths'][0]
-    outdict = list(np.cumsum(tmpout['lists_of_lengths'][0]))
+    outdict = np.cumsum(tmpout['lists_of_lengths'][0]).astype(np.int32).tolist()
     return outdict
 
 

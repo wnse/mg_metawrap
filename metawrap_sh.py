@@ -6,10 +6,12 @@ import logging
 import argparse
 import psutil
 import shutil
+import pandas as pd
 
 from post_status import copy_file
 from mkdir import mkdir
 from parse_fastqc_html import get_fqc
+from parse_quast_html import parse_quast_html
 
 def shell_db_path(db_path_file):
 	with open(db_path_file) as h:
@@ -206,7 +208,7 @@ def get_file_path(file):
     if os.path.isfile(file):
     	logging.info(f'get_file_path:{file}')
     	return {os.path.split(file)[1]:file}
-    elif os.path.isdir(i):
+    elif os.path.isdir(file):
         try:
         	for f in os.listdir(file):
         		tmp_f = os.path.join(file, f)
@@ -243,7 +245,7 @@ def copy_file_batch(name_list, tmp_dir, outdir, step=2):
 		res_file = res_file2
 
 	for sample in name_list:
-		res_file['READ_QC'].append(os.path.join(tmp_dir, 'READ_QC', sample))
+		res_file['READ_QC'].append(sample)
 
 		html_list = [os.path.join(tmp_dir, 'READ_QC', sample, 'pre-QC_report', i) for i in [f'{sample}_1_fastqc.html', f'{sample}_2_fastqc.html'] ]
 		outdict['preQc'] = {}
@@ -251,18 +253,15 @@ def copy_file_batch(name_list, tmp_dir, outdir, step=2):
 			sample_name = os.path.splitext(os.path.split(html)[1])[0]
 			outdict['preQc'][sample_name] = get_fqc(html)
 
-		html_list = [os.path.join(tmp_dir, 'READ_QC', sample, 'post-QC_report', i) for i in [f'{sample}_1_fastqc.html', f'{sample}_2_fastqc.html'] ]
+		html_list = [os.path.join(tmp_dir, 'READ_QC', sample, 'post-QC_report', i) for i in [f'final_pure_reads_1_fastqc.html', f'final_pure_reads_2_fastqc.html'] ]
 		outdict['postQc'] = {}
 		for html in html_list:
 			sample_name = os.path.splitext(os.path.split(html)[1])[0]
 			outdict['postQc'][sample_name] = get_fqc(html)
-	for sample in name_list:
-		try:
-			os.remove(os.path.join(outdir, 'READ_QC', sample, "host_reads_1.fastq"))
-			os.remove(os.path.join(outdir, 'READ_QC', sample, "host_reads_2.fastq"))
-		except Exception as e:
-			logging.error(f'rm_file {e}')
 
+	get_file_path_names = ['kronagram.html','blobplot_figures','blobplot_figures_only_binned_contigs','reassembled_bins.png','reassembly_results.png']
+	df_abu = pd.DataFrame()
+	df_tax = pd.DataFrame()
 	for d, fs in res_file.items():
 		target_dir = os.path.join(outdir, d)
 		mkdir(target_dir)
@@ -273,13 +272,38 @@ def copy_file_batch(name_list, tmp_dir, outdir, step=2):
 			logging.error(f'copy_file {e}')
 
 		for i in fs:
-			get_file_path_names = ['kronagram.html','blobplot_figures',
-			'blobplot_figures_only_binned_contigs','reassembled_bins.png','reassembly_results.png']
+			tmp_file = os.path.join(target_dir, i)
+
+			if i == 'QUAST_out':
+				tmp_html = os.path.join(target_dir, i, 'report.html')
+				outdict['ASSEMBLY_report'] = parse_quast_html(tmp_html)
+
+			if i == 'reassembled_bins.stats':
+				outdict['bin_sta'] = [v for i, v in pd.read_csv(tmp_file, sep='\t').to_dict(orient='index').items()]
+
+			if i == 'bin_abundance_table.tab':
+				df_abu = pd.read_csv(tmp_file,sep='\t',index_col=0)
+			if i == 'bin_taxonomy.tab':
+				df_tax = pd.read_csv(f1, sep='\t', header=None)
+				df_tax.index = df_tax[0].str.split('.').str[:2].str.join('.')
+
 			if i in get_file_path_names:
-				outdict.update(get_file_path(i))
+				# if i == 'kronagram.html':
+				# 	new_html_file = os.path.join(outdir, d,'kronagram_new.html')
+				# 	tmp_file = parse_krona_html(tmp_file, new_html_file)
+				outdict.update(get_file_path(tmp_file))
 
+	df_merge = pd.merge(df_tax, df_abu, left_index=True, right_index=True, how='outer').reset_index()
+	df_merge.columns = ['bin','bin_fa','tax','reads']
+	outdict['bin_tax'] = [v for i, v in df_merge.to_dict(orient='index').items()]
+
+	for sample in name_list:
+		try:
+			os.remove(os.path.join(outdir, 'READ_QC', sample, "host_reads_1.fastq"))
+			os.remove(os.path.join(outdir, 'READ_QC', sample, "host_reads_2.fastq"))
+		except Exception as e:
+			logging.error(f'rm_file {e}')
 	return outdict
-
 
 if __name__ == '__main__':
 	bin_dir = os.path.split(os.path.realpath(__file__))[0]

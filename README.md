@@ -1,10 +1,8 @@
 # mg_metawrap
 
-
-
 ## Install metaWRAP
 
-``` shell
+```shell
 sh Miniconda3-py39_4.11.0-Linux-x86_64.sh 
 source /root/.bashrc 
 conda install -y mamba
@@ -36,5 +34,4 @@ conda install --use-local blast-2.12.0-hf3cf87c_4.tar.bz2
 git clone https://github.com/tseemann/prokka.git $HOME/prokka
 /usr/bin/perl $HOME/prokka/bin/prokka --setupdb
 sed -i.bak -r 's/cmd="prokka/cmd="\/root\/miniconda3\/envs\/metawrap\-env\/bin\/perl \/root\/prokka\/bin\/prokka/g' /opt/conda/bin/metawrap-modules/annotate_bins.sh
-
 ```
