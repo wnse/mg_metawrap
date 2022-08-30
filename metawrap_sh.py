@@ -10,6 +10,10 @@ import pandas as pd
 
 from post_status import copy_file
 from mkdir import mkdir
+from post_status import post_url
+from post_status import post_pid
+from post_status import write_status
+from post_status import write_status
 from parse_fastqc_html import get_fqc
 from parse_quast_html import parse_quast_html
 
@@ -106,7 +110,7 @@ def shell_classify(binRadir, out, threads):
 	return shell_str
 
 
-def get_kraken_shell(db_config, data_list, name_list, outdir, threads, kraken=False):
+def get_kraken_shell(db_config, data_list, name_list, outdir, threads, memory_G, kraken=False):
 	lst_total_shell =  []
 	db_path_shell = shell_db_path(db_config)
 	lst_total_shell.append(db_path_shell)
@@ -147,10 +151,10 @@ def get_kraken_shell(db_config, data_list, name_list, outdir, threads, kraken=Fa
 	shell_str = '\n'.join(lst_total_shell)
 	return shell_str, clean_data_list, total_clean_data_list
 
-def get_assemble_shell(db_config, data_list, name_list, outdir, threads, memory_G):
+def get_assemble_shell(db_config, data_list, name_list, outdir, threads, memory_G, kraken=False):
 	lst_total_shell = []
 
-	clean_shell, clean_data_list, total_clean_data_list = get_kraken_shell(db_config, data_list, name_list, outdir, threads)
+	clean_shell, clean_data_list, total_clean_data_list = get_kraken_shell(db_config, data_list, name_list, outdir, threads， memory_G)
 	lst_total_shell.append(clean_shell)
 
 	assemble_shell, assemble_contig = shell_assembly(total_clean_data_list[0], total_clean_data_list[1], outdir, threads, memory_G)
@@ -163,7 +167,7 @@ def get_assemble_shell(db_config, data_list, name_list, outdir, threads, memory_
 	shell_str = '\n'.join(lst_total_shell)
 	return shell_str, assemble_contig, clean_data_list, total_clean_data_list
 
-def get_binning_shell(db_config, data_list, name_list, outdir, threads, memory_G):
+def get_binning_shell(db_config, data_list, name_list, outdir, threads, memory_G, kraken=False):
 	assemble_shell, assemble_contig, clean_data_list, total_clean_data_list = get_assemble_shell(db_config, data_list, name_list, outdir, threads, memory_G)
 	clean_data_list = [i for item in clean_data_list for i in item]
 
@@ -206,8 +210,10 @@ def run_sh(sh_file, path_list):
 def get_file_path(file):
     outdict = {}
     if os.path.isfile(file):
+    	file_key = os.path.split(file)[1]
+    	file_key = str(file_key).replace('.','_')
     	logging.info(f'get_file_path:{file}')
-    	return {os.path.split(file)[1]:file}
+    	return {file_key:file}
     elif os.path.isdir(file):
         try:
         	for f in os.listdir(file):
@@ -273,29 +279,33 @@ def copy_file_batch(name_list, tmp_dir, outdir, step=2):
 
 		for i in fs:
 			tmp_file = os.path.join(target_dir, i)
+			if os.path.isfile(tmp_file) or os.path.isdir(tmp_file):
 
-			if i == 'QUAST_out':
-				tmp_html = os.path.join(target_dir, i, 'report.html')
-				outdict['ASSEMBLY_report'] = parse_quast_html(tmp_html)
+				if i == 'QUAST_out':
+					tmp_html = os.path.join(target_dir, i, 'report.html')
+					outdict['ASSEMBLY_report'] = parse_quast_html(tmp_html)
 
-			if i == 'reassembled_bins.stats':
-				outdict['bin_sta'] = [v for i, v in pd.read_csv(tmp_file, sep='\t').to_dict(orient='index').items()]
+				if i == 'reassembled_bins.stats':
+					outdict['bin_sta'] = [v for i, v in pd.read_csv(tmp_file, sep='\t').to_dict(orient='index').items()]
 
-			if i == 'bin_abundance_table.tab':
-				df_abu = pd.read_csv(tmp_file,sep='\t',index_col=0)
-			if i == 'bin_taxonomy.tab':
-				df_tax = pd.read_csv(f1, sep='\t', header=None)
-				df_tax.index = df_tax[0].str.split('.').str[:2].str.join('.')
+				if i == 'bin_abundance_table.tab':
+					df_abu = pd.read_csv(tmp_file,sep='\t',index_col=0)
+				if i == 'bin_taxonomy.tab':
+					df_tax = pd.read_csv(tmp_file, sep='\t', header=None)
+					df_tax.index = df_tax[0].str.split('.').str[:2].str.join('.')
 
-			if i in get_file_path_names:
-				# if i == 'kronagram.html':
-				# 	new_html_file = os.path.join(outdir, d,'kronagram_new.html')
-				# 	tmp_file = parse_krona_html(tmp_file, new_html_file)
-				outdict.update(get_file_path(tmp_file))
-
-	df_merge = pd.merge(df_tax, df_abu, left_index=True, right_index=True, how='outer').reset_index()
-	df_merge.columns = ['bin','bin_fa','tax','reads']
-	outdict['bin_tax'] = [v for i, v in df_merge.to_dict(orient='index').items()]
+				if i in get_file_path_names:
+					# if i == 'kronagram.html':
+					# 	new_html_file = os.path.join(outdir, d,'kronagram_new.html')
+					# 	tmp_file = parse_krona_html(tmp_file, new_html_file)
+					outdict.update(get_file_path(tmp_file))
+	try:
+		if (not df_abu.empty) and (not df_tax.empty):
+			df_merge = pd.merge(df_tax, df_abu, left_index=True, right_index=True, how='outer').reset_index()
+			df_merge.columns = ['bin','bin_fa','tax','reads']
+			outdict['bin_tax'] = [v for i, v in df_merge.to_dict(orient='index').items()]
+	except Exception as e:
+		logging.error(f'merge_tax_abu {e}')
 
 	for sample in name_list:
 		try:
@@ -318,14 +328,29 @@ if __name__ == '__main__':
 	parser.add_argument('-t', '--threads', default=cpu_num, help='threads for metawrap')
 	parser.add_argument('-m', '--memory', default=memory_total, help='memory(G) for fastqc')
 	parser.add_argument('-config', '--config', default=os.path.join(bin_dir, 'DB_config.json'), help='database path json')
+	parser.add_argument('-step', '--step', default='mgTax', choices=['mgTax','mgAss', 'mgBin'], help='chose step for analysis')
+	parser.add_argument('-tID', '--taskID', default='', help='task ID for report status')
+	parser.add_argument('-debug', '--debug', action='store_true')
 
 	args = parser.parse_args()
+	step = 0
+	step_ana = get_kraken_shell
+	if args.step == 'mgAss':
+		step = 1 
+		step_ana = get_assemble_shell
+	elif args.step == 'mgBin':
+		step = 2
+		step_ana = get_binning_shell
 
 	outdir = args.outdir
 	mkdir(outdir)
 	logfile = os.path.join(outdir, 'log')
 	logging.basicConfig(level=logging.INFO, filename=logfile, format='%(asctime)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S')
 	# logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S')
+	
+	taskID = args.taskID
+	post_pid(taskID)
+	status_report = os.path.join(outdir, 'status_report.txt')
 
 	db_config = args.config
 	data_list = args.input
@@ -336,20 +361,43 @@ if __name__ == '__main__':
 	tmp_dir = os.path.join(outdir, 'tmp_dir')
 	mkdir(tmp_dir)
 
-	outdict = get_binning_shell(db_config, data_list, name_list, tmp_dir, threads, memory)
-	sh_file = os.path.join(outdir, 'metawrap.sh')
-	with open(sh_file, 'w') as h:
-		print(outdict, file=h)
+	try:
+		s = f'{args.step}\tR\t'
 
-	with open(db_config) as h:
-		db_path = json.load(h)
-	# db_path = '/mnt/data/metawrap_db/'
-	data_list_tmp = [i for data in data_list for i in data]
-	path_list = list(db_path.values()) + [outdir] + data_list_tmp
-	logging.info(path_list)
-	# sys.exit()
-	run_sh(sh_file, path_list)
+		shell_str = step_ana(db_config, data_list, name_list, tmp_dir, threads, memory, kraken=True)
+		sh_file = os.path.join(outdir, 'metawrap.sh')
+		with open(sh_file, 'w') as h:
+			print(shell_str, file=h)
 
+		with open(db_config) as h:
+			db_path = json.load(h)
+		# db_path = '/mnt/data/metawrap_db/'
+		data_list_tmp = [i for data in data_list for i in data]
+		path_list = list(db_path.values()) + [outdir] + data_list_tmp
+		logging.info(path_list)
+		# sys.exit()
+		run_sh(sh_file, path_list)
+
+		outdict = copy_file_batch(name_list, tmp_dir, outdir, step=step)
+		with open(os.path.join(outdir, f'{args.step}.json'), 'w') as H:
+			json.dump(outdict, H, indent=2)
+
+	except Exception as e:
+		logging.error(e)
+		s = f'{args.step}\tE\t'
+
+	try:
+		write_status(status_report, args.step)
+		post_url(taskID, args.step)
+	except Exception as e:
+		logging.error(f'{args.step} status {e}')
+	if not args.debug:
+		try:
+			shutil.rmtree(tmp_dir)
+		except Exception as e:
+			logging.error(e)
+
+'''
 	res_file = {
 		'READ_QC':[],
 		'KRAKEN':['kronagram.html'],
@@ -385,5 +433,5 @@ if __name__ == '__main__':
 	except Exception as e:
 		logging.error(f'rm_file {e}')
 
-
+'''
 

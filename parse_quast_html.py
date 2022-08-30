@@ -112,6 +112,7 @@ def get_gc(html_file):
 # %%
 def parse_quast_html(html_file):
     outdict = {}
+    logging.info(html_file)
     outdict['sta'] = get_total_report(html_file)
     outdict['contig_length'] = get_contigs_lengths(html_file)
     outdict['Nx'] = get_coord_nx(html_file)
